@@ -436,21 +436,10 @@ export async function solveHubDrive(url: string) {
 }
 
 // =============================================================================
-// HUBCLOUD SOLVER — FIXED ARCHITECTURE
+// HUBCLOUD SOLVER — HARDCODED API ARCHITECTURE
 //
-// PROBLEM: HubCloud pages use Cloudflare protection. Python's `cloudscraper`
-//          library bypasses this easily, but Node.js/axios CANNOT.
-//          So axios gets a Cloudflare challenge page → no download buttons → FAIL.
-//
-// SOLUTION: Two-layer approach:
-//   1. PRIMARY: External Python API (your Flask + cloudscraper script on Render)
-//      — This is the RELIABLE method that actually bypasses Cloudflare
-//   2. FALLBACK: Native axios fetch (only works on non-Cloudflare pages)
-//
-// SETUP: Set HUBCLOUD_API_URL in your Vercel Environment Variables:
-//   HUBCLOUD_API_URL=https://your-hubcloud-api.onrender.com/solve?url=
-//
-// Or if your Python Flask script is at a different path, adjust accordingly.
+// LAYER 1: Primary - Uses your custom Python API (bypasses Cloudflare)
+// LAYER 2: Fallback - Uses native axios fetch
 // =============================================================================
 
 interface HubCloudButton {
@@ -467,18 +456,11 @@ export interface HubCloudNativeResult {
 }
 
 /**
- * LAYER 1 — PRIMARY: Call external Python Flask API (uses cloudscraper)
- * 
- * Your Python script returns:
- * { status: "success", best_button_name: "...", best_download_link: "...", all_available_buttons: [...] }
+ * LAYER 1 — PRIMARY: Call external Python Flask API
  */
 async function _solveHubCloudViaAPI(url: string): Promise<HubCloudNativeResult> {
-  const apiBase = process.env.HUBCLOUD_API_URL;
-
-  if (!apiBase) {
-    console.log('[HubCloud] ⚠️ HUBCLOUD_API_URL not set — skipping external API');
-    return { status: 'error', message: 'HUBCLOUD_API_URL not configured' };
-  }
+  // HARDCODED CUSTOM SERVER API URL
+  const apiBase = "http://85.121.5.246:5000/solve?url=";
 
   try {
     const apiUrl = apiBase + encodeURIComponent(url);
@@ -512,8 +494,6 @@ async function _solveHubCloudViaAPI(url: string): Promise<HubCloudNativeResult> 
 
 /**
  * LAYER 2 — FALLBACK: Native Node.js/axios fetch
- * Works only on pages NOT protected by Cloudflare.
- * Exact logic translated from your Python script.
  */
 async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeResult> {
   try {
@@ -560,7 +540,7 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
             return { status: 'error', message: 'Cloudflare protected — needs external API' };
           }
 
-          // Step 2: Find Intermediate Link (same as Python script)
+          // Step 2: Find Intermediate Link
           const pattern1 = /id="download"[^>]*href="([^"]+)"/;
           const pattern2 = /var url = '([^']+)'/;
           const pattern3 = /href="([^"]+hubcloud\.php\?[^"]+)"/;
@@ -579,7 +559,6 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
                 validateStatus: (status: number) => status < 500,
               });
               if (finalResp.data && typeof finalResp.data === 'string' && finalResp.data.length > 100) {
-                // Check intermediate page for CF too
                 if (finalResp.data.includes('cf-browser-verification') || finalResp.data.includes('cf_chl_opt')) {
                   return { status: 'error', message: 'Intermediate page Cloudflare protected' };
                 }
@@ -607,7 +586,7 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
       return { status: 'error', message: 'Failed to fetch page (blocked/empty)' };
     }
 
-    // Step 4: Extract download buttons (same regex as Python script)
+    // Step 4: Extract download buttons
     const rawLinkRegex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
     const allExtractedLinks: HubCloudButton[] = [];
 
@@ -639,11 +618,10 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
       return { status: 'error', message: 'No valid download button found on the page.' };
     }
 
-    // Step 5: Priority Logic (exact from Python)
+    // Step 5: Priority Logic
     let bestLink: string | null = null;
     let bestButtonName: string | null = null;
 
-    // Priority 1: "FSL Server" (non-v2)
     for (const item of allExtractedLinks) {
       if (item.button_name.includes('FSL Server') && !item.button_name.includes('v2')) {
         bestLink = item.download_link;
@@ -652,7 +630,6 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
       }
     }
 
-    // Priority 2: FSLv2 or any token/Server link
     if (!bestLink) {
       for (const item of allExtractedLinks) {
         if (item.download_link.includes('token=') || item.button_name.includes('Server')) {
@@ -663,7 +640,6 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
       }
     }
 
-    // Priority 3: Fallback to first link
     if (!bestLink && allExtractedLinks.length > 0) {
       bestLink = allExtractedLinks[0].download_link;
       bestButtonName = allExtractedLinks[0].button_name;
@@ -682,15 +658,7 @@ async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeRes
 }
 
 /**
- * MAIN HUBCLOUD SOLVER — called by route.ts
- *
- * Strategy:
- *   1. FIRST: Call external Python API (cloudscraper bypasses Cloudflare)
- *   2. FALLBACK: Try native axios fetch (non-CF pages only)
- *
- * SETUP REQUIRED:
- *   Add to Vercel Environment Variables:
- *   HUBCLOUD_API_URL=https://your-hubcloud-api.onrender.com/solve?url=
+ * MAIN HUBCLOUD SOLVER
  */
 export async function solveHubCloudNative(url: string): Promise<HubCloudNativeResult> {
   console.log(`[HubCloud] 🚀 Starting: ${url}`);
@@ -698,7 +666,7 @@ export async function solveHubCloudNative(url: string): Promise<HubCloudNativeRe
   // ── LAYER 1: External Python API (PRIMARY — reliable Cloudflare bypass) ──
   const apiResult = await _solveHubCloudViaAPI(url);
   if (apiResult.status === 'success') {
-    console.log('[HubCloud] ✅ Solved via External Python API');
+    console.log('[HubCloud] ✅ Solved via Custom Python API');
     return apiResult;
   }
   console.log(`[HubCloud] ⚠️ API failed: ${apiResult.message}`);
@@ -713,14 +681,6 @@ export async function solveHubCloudNative(url: string): Promise<HubCloudNativeRe
   console.log(`[HubCloud] ❌ Native also failed: ${nativeResult.message}`);
 
   // ── BOTH FAILED ──
-  const hasApiUrl = !!process.env.HUBCLOUD_API_URL;
-  if (!hasApiUrl) {
-    return {
-      status: 'error',
-      message: 'Cloudflare protected. Set HUBCLOUD_API_URL in Vercel env vars to your Python API URL.',
-    };
-  }
-
   return {
     status: 'error',
     message: `API: ${apiResult.message} | Native: ${nativeResult.message}`,
