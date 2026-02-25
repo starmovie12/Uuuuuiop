@@ -80,13 +80,7 @@ export default function MflixApp() {
   const streamStartedRef = useRef<Set<string>>(new Set());
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ==========================================================================
-  // THE ULTIMATE "MEMORY SHIELD" FIX
-  // This ref permanently stores terminal link states (done/error) and their 
-  // final links/logs even after the stream dies or Firebase sends stale data.
-  // ==========================================================================
   const completedLinksRef = useRef<Record<string, Record<number, any>>>({});
-  // Track when a stream ended to give Firestore time to catch up without UI jumping
   const streamEndedAtRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
@@ -109,29 +103,20 @@ export default function MflixApp() {
           const now = Date.now();
 
           return data.map((serverTask: Task) => {
-            // 1. If currently streaming, ignore Firebase completely to avoid flicker
             if (currentlyStreamingIds.has(serverTask.id)) {
               const localTask = prevTasks.find(t => t.id === serverTask.id);
               if (localTask) return localTask;
             }
 
-            // 2. If stream recently ended (within 15s), Firebase might be stale.
-            // Protect it heavily using our Memory Shield.
             const endedAt = streamEndedAtRef.current[serverTask.id];
             const isRecentlyEnded = endedAt && (now - endedAt < 15000);
-
-            // 3. Merge Firebase data with our permanent Memory Shield (completedLinksRef)
-            // NEVER let Firebase downgrade a 'done' link back to 'pending'.
             const shieldData = completedLinksRef.current[serverTask.id] || {};
             
             const mergedLinks = (serverTask.links || []).map((fbLink: any, idx: number) => {
               const protectedLink = shieldData[idx];
-              
               if (protectedLink) {
-                // If we KNOW it's done/error, but Firebase says pending, FORCE our state
                 const fbStatus = (fbLink.status || '').toLowerCase();
                 const isFbPending = fbStatus === 'pending' || fbStatus === 'processing' || fbStatus === '';
-                
                 if (isFbPending || isRecentlyEnded) {
                   return {
                     ...fbLink,
@@ -145,8 +130,7 @@ export default function MflixApp() {
               return fbLink;
             });
 
-            // Re-calculate task status based on the shielded links
-            const allDone = mergedLinks.every((l: any) => {
+            const allDone = mergedLinks.length > 0 && mergedLinks.every((l: any) => {
               const s = (l.status || '').toLowerCase();
               return s === 'done' || s === 'success' || s === 'error' || s === 'failed';
             });
@@ -157,13 +141,9 @@ export default function MflixApp() {
             
             let newTaskStatus = serverTask.status;
             if (allDone) newTaskStatus = anySuccess ? 'completed' : 'failed';
-            else if (isRecentlyEnded) newTaskStatus = 'processing'; // Keep it processing visually if recently ended
+            else if (isRecentlyEnded) newTaskStatus = 'processing';
 
-            return {
-              ...serverTask,
-              status: newTaskStatus,
-              links: mergedLinks
-            };
+            return { ...serverTask, status: newTaskStatus, links: mergedLinks };
           });
         });
       }
@@ -176,12 +156,11 @@ export default function MflixApp() {
     const isLive = activeTaskId === task.id;
     const shieldData = completedLinksRef.current[task.id] || {};
     
-    const total = task.links.length;
+    const total = task.links?.length || 0;
     let done = 0, failed = 0, pending = 0;
 
     for (let i = 0; i < total; i++) {
       let status = '';
-      
       if (isLive && liveStatuses[i]) {
         status = liveStatuses[i];
       } else if (shieldData[i]) {
@@ -199,15 +178,25 @@ export default function MflixApp() {
     return { total, done, failed, pending };
   }, [activeTaskId, liveStatuses]);
 
+  // =========================================================================
+  // FIX 1: FORCE STATUS SYNC
+  // Calculates the TRUE status of a task based solely on its effective stats
+  // =========================================================================
+  const getTrueTaskStatus = (task: Task, stats: { total: number; done: number; failed: number; pending: number }) => {
+    if (activeTaskId === task.id) return 'processing';
+    if (stats.total > 0 && stats.pending === 0) {
+      return stats.done > 0 ? 'completed' : 'failed';
+    }
+    return task.status;
+  };
+
   const startLiveStream = useCallback(async (taskId: string, links: any[]) => {
     if (streamStartedRef.current.has(taskId)) return;
 
-    // Build pending links, but check our Memory Shield first!
     const shieldData = completedLinksRef.current[taskId] || {};
     const pendingLinks = links
       .map((l: any, idx: number) => ({ ...l, _originalIdx: idx }))
       .filter((l: any) => {
-        // If our shield knows it's done, it's not pending.
         if (shieldData[l._originalIdx]) return false;
         const s = (l.status || '').toLowerCase();
         return s === 'pending' || s === 'processing' || s === '';
@@ -218,7 +207,6 @@ export default function MflixApp() {
     streamStartedRef.current.add(taskId);
     setActiveTaskId(taskId);
     
-    // Ensure memory shield exists for this task
     if (!completedLinksRef.current[taskId]) {
       completedLinksRef.current[taskId] = {};
     }
@@ -238,7 +226,6 @@ export default function MflixApp() {
           initialLogs[idx] = link.logs || [];
           initialLinks[idx] = link.finalLink || null;
           initialStatuses[idx] = 'done';
-          // Add to shield
           completedLinksRef.current[taskId][idx] = { status: 'done', finalLink: link.finalLink, logs: link.logs };
         } else if (s === 'error' || s === 'failed') {
           initialLogs[idx] = [{ msg: '🔄 Retrying...', type: 'info' }];
@@ -311,10 +298,6 @@ export default function MflixApp() {
 
             if (data.status === 'done' || data.status === 'error') {
               setLiveStatuses(prev => ({ ...prev, [lid]: data.status }));
-              
-              // ==============================================================
-              // SECURE THE SUCCESS: Save to Memory Shield immediately!
-              // ==============================================================
               setLiveLogs(currentLogs => {
                 setLiveLinks(currentLinks => {
                   completedLinksRef.current[taskId][lid] = {
@@ -333,30 +316,44 @@ export default function MflixApp() {
               setLiveStatuses(prev => {
                 const currentStatus = prev[lid];
                 if (currentStatus !== 'done' && currentStatus !== 'error') {
-                  // If it finished but wasn't marked done, it's an error. Save to shield.
                   completedLinksRef.current[taskId][lid] = { status: 'error', logs: [] };
                   return { ...prev, [lid]: 'error' };
                 }
                 return prev;
               });
             }
-          } catch {
-            // skip
-          }
+          } catch { }
         }
       }
     } catch (e: any) {
       console.error('[Stream] Stream error:', e);
     } finally {
       streamStartedRef.current.delete(taskId);
-      streamEndedAtRef.current[taskId] = Date.now(); // Mark end time to protect against immediate stale fetches
+      streamEndedAtRef.current[taskId] = Date.now();
       setTimeout(fetchTasks, 1000);
       setActiveTaskId(null);
     }
   }, []);
 
   const startProcess = async () => {
-    if (!url.trim()) return;
+    const trimmedUrl = url.trim();
+    if (!trimmedUrl) return;
+
+    // =========================================================================
+    // FIX 2: DUPLICATE URL BLOCKER
+    // Prevents submitting a URL that is already completed or currently processing
+    // =========================================================================
+    const alreadyCompleted = tasks.find(t => t.url === trimmedUrl && getTrueTaskStatus(t, getEffectiveStats(t)) === 'completed');
+    if (alreadyCompleted) {
+      setError("⚠️ Yeh movie pehle se hi nikal chuki hai. History tab mein check karein.");
+      return;
+    }
+
+    const currentlyProcessing = tasks.find(t => t.url === trimmedUrl && getTrueTaskStatus(t, getEffectiveStats(t)) === 'processing');
+    if (currentlyProcessing) {
+      setError("⏳ Yeh movie abhi process ho rahi hai. Kripya wait karein.");
+      return;
+    }
 
     setIsConnecting(true);
     setError(null);
@@ -366,7 +363,7 @@ export default function MflixApp() {
       const response = await fetch('/api/tasks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() })
+        body: JSON.stringify({ url: trimmedUrl })
       });
 
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
@@ -381,7 +378,6 @@ export default function MflixApp() {
       if (data.taskId) {
         setExpandedTask(data.taskId);
         setActiveTab('processing');
-        // Clear memory shield for this new task just in case
         completedLinksRef.current[data.taskId] = {};
 
         try {
@@ -424,7 +420,6 @@ export default function MflixApp() {
       setTasks(prev => prev.filter(t => t.id !== taskId));
       if (expandedTask === taskId) setExpandedTask(null);
       
-      // Cleanup shields
       delete completedLinksRef.current[taskId];
       delete streamEndedAtRef.current[taskId];
     } catch (err: any) {
@@ -446,7 +441,6 @@ export default function MflixApp() {
         body: JSON.stringify({ taskId: task.id }),
       });
 
-      // Clear memory shields for the retry
       delete completedLinksRef.current[task.id];
       delete streamEndedAtRef.current[task.id];
 
@@ -486,47 +480,28 @@ export default function MflixApp() {
     const isLive = activeTaskId === task.id;
     const shield = completedLinksRef.current[task.id]?.[linkIdx];
     
-    // 1. Prefer Live Data during stream
     if (isLive && liveStatuses[linkIdx]) {
-      return {
-        logs: liveLogs[linkIdx] || [],
-        finalLink: liveLinks[linkIdx] || null,
-        status: liveStatuses[linkIdx],
-      };
+      return { logs: liveLogs[linkIdx] || [], finalLink: liveLinks[linkIdx] || null, status: liveStatuses[linkIdx] };
     }
-    
-    // 2. Prefer Shield Data (protected successful/failed links)
     if (shield) {
-      return {
-        logs: shield.logs || [],
-        finalLink: shield.finalLink || link.finalLink || null,
-        status: shield.status,
-      };
+      return { logs: shield.logs || [], finalLink: shield.finalLink || link.finalLink || null, status: shield.status };
     }
-    
-    // 3. Fallback to Firebase Data
-    return {
-      logs: link.logs || [],
-      finalLink: link.finalLink || null,
-      status: link.status || 'processing',
-    };
+    return { logs: link.logs || [], finalLink: link.finalLink || null, status: link.status || 'processing' };
   };
 
+  // Uses the TRUE task status for filtering tabs
   const getFilteredTasks = (): Task[] => {
     switch (activeTab) {
-      case 'processing': return tasks.filter(t => t.status === 'processing');
-      case 'completed': return tasks.filter(t => t.status === 'completed');
-      case 'failed': return tasks.filter(t => t.status === 'failed');
+      case 'processing': return tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'processing');
+      case 'completed': return tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'completed');
+      case 'failed': return tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'failed');
       case 'history': return [...tasks].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       case 'home': default: return tasks;
     }
   };
 
   const filteredTasks = getFilteredTasks();
-
-  const tabLabels: Record<TabType, string> = {
-    home: 'Home', processing: 'Processing', completed: 'Completed', failed: 'Failed', history: 'History',
-  };
+  const tabLabels: Record<TabType, string> = { home: 'Home', processing: 'Processing', completed: 'Completed', failed: 'Failed', history: 'History' };
 
   return (
     <div className="max-w-2xl mx-auto px-4 py-8 pb-28">
@@ -599,6 +574,8 @@ export default function MflixApp() {
       <div className="space-y-4">
         {filteredTasks.map((task) => {
           const stats = getEffectiveStats(task);
+          const trueStatus = getTrueTaskStatus(task, stats);
+
           return (
             <div key={task.id} className="bg-white/5 backdrop-blur-xl border border-white/10 rounded-2xl overflow-hidden transition-all hover:bg-white/[0.07]">
               <div className="p-4 flex items-center gap-4 cursor-pointer" onClick={() => setExpandedTask(expandedTask === task.id ? null : task.id)}>
@@ -614,11 +591,11 @@ export default function MflixApp() {
                   <p className="font-mono text-[10px] text-slate-500 truncate mt-0.5">{task.url}</p>
                   <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                     <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                      task.status === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
-                      task.status === 'failed' ? 'bg-rose-500/20 text-rose-400' :
+                      trueStatus === 'completed' ? 'bg-emerald-500/20 text-emerald-400' :
+                      trueStatus === 'failed' ? 'bg-rose-500/20 text-rose-400' :
                       'bg-indigo-500/20 text-indigo-400 animate-pulse'
                     }`}>
-                      {task.status === 'processing' && activeTaskId === task.id ? '⚡ LIVE' : task.status}
+                      {trueStatus === 'processing' && activeTaskId === task.id ? '⚡ LIVE' : trueStatus}
                     </span>
                     <span className="text-slate-600 text-[10px]">{formatTime12h(task.createdAt)}</span>
                     {stats.total > 0 && (
@@ -633,7 +610,7 @@ export default function MflixApp() {
                 </div>
 
                 <div className="flex items-center gap-1.5 flex-shrink-0">
-                  {task.status === 'failed' && (
+                  {trueStatus === 'failed' && (
                     <button onClick={(e) => handleRetryTask(task, e)} disabled={retryingTaskId === task.id} className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20 transition-all disabled:opacity-50">
                       {retryingTaskId === task.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
                     </button>
@@ -737,9 +714,9 @@ export default function MflixApp() {
         <div className="max-w-2xl mx-auto flex items-stretch justify-around">
           {([{ key: 'home' as TabType, icon: Home, label: 'Home' }, { key: 'processing' as TabType, icon: Clock, label: 'Processing' }, { key: 'completed' as TabType, icon: CheckCircle2, label: 'Completed' }, { key: 'failed' as TabType, icon: XCircle, label: 'Failed' }, { key: 'history' as TabType, icon: History, label: 'History' }]).map(({ key, icon: Icon, label }) => {
             const isActive = activeTab === key;
-            const count = key === 'processing' ? tasks.filter(t => t.status === 'processing').length :
-                          key === 'completed' ? tasks.filter(t => t.status === 'completed').length :
-                          key === 'failed' ? tasks.filter(t => t.status === 'failed').length :
+            const count = key === 'processing' ? tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'processing').length :
+                          key === 'completed' ? tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'completed').length :
+                          key === 'failed' ? tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'failed').length :
                           key === 'history' ? tasks.length : 0;
 
             return (
