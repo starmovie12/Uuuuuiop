@@ -8,7 +8,7 @@ import { solveHBLinks, solveHubCDN, solveHubDrive, solveHubCloudNative } from '@
 // HubCloud is handled via HUBCLOUD_API_URL env var inside solvers.ts
 // =============================================================================
 const API_MAP = {
-  timer: 'https://time-page-bay-pass-edhc.onrender.com/solve?url=',
+  timer: 'http://85.121.5.246:10000/solve?url=',
   hblinks: 'https://hblinks-dad.onrender.com/solve?url=',
   hubdrive: 'https://hdhub4u-1.onrender.com/solve?url=',
   // hubcloud: Now handled inside solveHubCloudNative() via HUBCLOUD_API_URL env var
