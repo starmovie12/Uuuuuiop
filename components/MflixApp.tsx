@@ -178,10 +178,6 @@ export default function MflixApp() {
     return { total, done, failed, pending };
   }, [activeTaskId, liveStatuses]);
 
-  // =========================================================================
-  // FIX 1: FORCE STATUS SYNC
-  // Calculates the TRUE status of a task based solely on its effective stats
-  // =========================================================================
   const getTrueTaskStatus = (task: Task, stats: { total: number; done: number; failed: number; pending: number }) => {
     if (activeTaskId === task.id) return 'processing';
     if (stats.total > 0 && stats.pending === 0) {
@@ -340,19 +336,38 @@ export default function MflixApp() {
     if (!trimmedUrl) return;
 
     // =========================================================================
-    // FIX 2: DUPLICATE URL BLOCKER
-    // Prevents submitting a URL that is already completed or currently processing
+    // SMART URL NORMALIZER: Ignores http/https, www, and trailing slashes
     // =========================================================================
-    const alreadyCompleted = tasks.find(t => t.url === trimmedUrl && getTrueTaskStatus(t, getEffectiveStats(t)) === 'completed');
-    if (alreadyCompleted) {
-      setError("⚠️ Yeh movie pehle se hi nikal chuki hai. History tab mein check karein.");
-      return;
-    }
+    const normalizeUrl = (u: string) => {
+      return u.toLowerCase()
+              .replace(/^https?:\/\//, '')
+              .replace(/^www\./, '')
+              .replace(/\/$/, ''); // removes slash at the end
+    };
 
-    const currentlyProcessing = tasks.find(t => t.url === trimmedUrl && getTrueTaskStatus(t, getEffectiveStats(t)) === 'processing');
-    if (currentlyProcessing) {
-      setError("⏳ Yeh movie abhi process ho rahi hai. Kripya wait karein.");
-      return;
+    const targetUrl = normalizeUrl(trimmedUrl);
+    
+    // Check if this EXACT movie already exists in our tasks
+    const existingTask = tasks.find(t => normalizeUrl(t.url) === targetUrl);
+
+    if (existingTask) {
+      const trueStatus = getTrueTaskStatus(existingTask, getEffectiveStats(existingTask));
+
+      if (trueStatus === 'completed') {
+        setError("✅ Yeh movie pehle se hi nikal chuki hai! Niche open kar di gayi hai.");
+        setExpandedTask(existingTask.id);
+        setActiveTab('completed'); // Redirects user to completed tab
+        setUrl('');
+        return;
+      }
+
+      if (trueStatus === 'processing') {
+        setError("⏳ Yeh movie already process ho rahi hai! Niche check karein.");
+        setExpandedTask(existingTask.id);
+        setActiveTab('processing'); // Redirects user to processing tab
+        setUrl('');
+        return;
+      }
     }
 
     setIsConnecting(true);
@@ -489,7 +504,6 @@ export default function MflixApp() {
     return { logs: link.logs || [], finalLink: link.finalLink || null, status: link.status || 'processing' };
   };
 
-  // Uses the TRUE task status for filtering tabs
   const getFilteredTasks = (): Task[] => {
     switch (activeTab) {
       case 'processing': return tasks.filter(t => getTrueTaskStatus(t, getEffectiveStats(t)) === 'processing');
@@ -540,25 +554,25 @@ export default function MflixApp() {
             {isConnecting ? <><Loader2 className="w-5 h-5 animate-spin" />CONNECTING...</> : 
              isProcessing ? <><RotateCcw className="w-5 h-5 animate-spin" />PROCESSING LIVE...</> : 
              isDone ? <><CircleCheck className="w-5 h-5" />ALL DONE ✅</> : 
-             error ? <><AlertTriangle className="w-5 h-5" />ERROR - RETRY</> : 
+             error ? <><AlertTriangle className="w-5 h-5" />ERROR</> : 
              <><Rocket className="w-5 h-5" />START ENGINE</>}
           </button>
 
           {error && (
-            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-4 p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-sm flex items-center gap-3">
-              <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-sm flex items-center gap-3">
+              <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
               <p className="flex-1">{error}</p>
-              <button onClick={() => setError(null)} className="text-xs font-bold uppercase hover:text-rose-300">Dismiss</button>
+              <button onClick={() => setError(null)} className="text-xs font-bold uppercase hover:text-emerald-300">Dismiss</button>
             </motion.div>
           )}
         </section>
       )}
 
       {activeTab !== 'home' && error && (
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-4 p-4 bg-rose-500/10 border border-rose-500/20 rounded-xl text-rose-400 text-sm flex items-center gap-3">
-          <AlertTriangle className="w-5 h-5 flex-shrink-0" />
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-xl text-emerald-400 text-sm flex items-center gap-3">
+          <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
           <p className="flex-1">{error}</p>
-          <button onClick={() => setError(null)} className="text-xs font-bold uppercase hover:text-rose-300">Dismiss</button>
+          <button onClick={() => setError(null)} className="text-xs font-bold uppercase hover:text-emerald-300">Dismiss</button>
         </motion.div>
       )}
 
