@@ -2,7 +2,7 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 
 // =============================================================================
-// BROWSER-LIKE HEADERS — prevents 403 Forbidden on HubCloud
+// BROWSER-LIKE HEADERS
 // =============================================================================
 const BROWSER_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -31,7 +31,6 @@ const MOBILE_HEADERS = {
 
 /**
  * Native Node.js implementation of the hblinks.dad solver.
- * FIX: Now checks multiple HubCloud TLD variants dynamically.
  */
 export async function solveHBLinks(url: string) {
   try {
@@ -436,10 +435,7 @@ export async function solveHubDrive(url: string) {
 }
 
 // =============================================================================
-// HUBCLOUD SOLVER — HARDCODED API ARCHITECTURE
-//
-// LAYER 1: Primary - Uses your custom Python API (bypasses Cloudflare)
-// LAYER 2: Fallback - Uses native axios fetch
+// HUBCLOUD SOLVER — STRICTLY API DRIVEN (PLAN A ONLY)
 // =============================================================================
 
 interface HubCloudButton {
@@ -456,11 +452,14 @@ export interface HubCloudNativeResult {
 }
 
 /**
- * LAYER 1 — PRIMARY: Call external Python Flask API
+ * MAIN HUBCLOUD SOLVER
+ * Directly calls your custom Python API to bypass Cloudflare securely.
  */
-async function _solveHubCloudViaAPI(url: string): Promise<HubCloudNativeResult> {
-  // HARDCODED CUSTOM SERVER API URL
+export async function solveHubCloudNative(url: string): Promise<HubCloudNativeResult> {
+  // HARDCODED CUSTOM SERVER API URL (PLAN A)
   const apiBase = "http://85.121.5.246:5000/solve?url=";
+
+  console.log(`[HubCloud] 🚀 Starting API Solver: ${url}`);
 
   try {
     const apiUrl = apiBase + encodeURIComponent(url);
@@ -490,199 +489,4 @@ async function _solveHubCloudViaAPI(url: string): Promise<HubCloudNativeResult> 
     console.error(`[HubCloud API] ❌ Error: ${e.message}`);
     return { status: 'error', message: `API error: ${e.message}` };
   }
-}
-
-/**
- * LAYER 2 — FALLBACK: Native Node.js/axios fetch
- */
-async function _solveHubCloudNativeFetch(url: string): Promise<HubCloudNativeResult> {
-  try {
-    let cleanUrl = decodeURIComponent(url).trim();
-    const httpIdx = cleanUrl.indexOf('http');
-    if (httpIdx > 0) {
-      cleanUrl = cleanUrl.substring(httpIdx);
-    }
-
-    console.log(`[HubCloud Native] Processing: ${cleanUrl}`);
-
-    // Try multiple header sets (desktop first, then mobile)
-    const headerSets = [
-      { ...BROWSER_HEADERS, "Referer": "https://hdhub4u.fo/" },
-      { ...MOBILE_HEADERS, "Referer": "https://hdhub4u.fo/" },
-    ];
-
-    let finalHtml: string = '';
-    let gotPage = false;
-
-    for (let attempt = 0; attempt < headerSets.length; attempt++) {
-      const headers = headerSets[attempt];
-      try {
-        const resp = await axios.get(cleanUrl, {
-          headers,
-          timeout: 8000,
-          maxRedirects: 5,
-          validateStatus: (status: number) => status < 500, // Accept 403 too
-        });
-
-        if (resp.data && typeof resp.data === 'string' && resp.data.length > 100) {
-          finalHtml = resp.data;
-          gotPage = true;
-
-          // Detect Cloudflare challenge page
-          const isCFChallenge = finalHtml.includes('cf-browser-verification') ||
-                                finalHtml.includes('cf_chl_opt') ||
-                                finalHtml.includes('Checking your browser') ||
-                                finalHtml.includes('challenge-platform') ||
-                                finalHtml.includes('jschl-answer');
-
-          if (isCFChallenge) {
-            console.log('[HubCloud Native] ⚠️ Cloudflare challenge — native cannot bypass');
-            return { status: 'error', message: 'Cloudflare protected — needs external API' };
-          }
-
-          // Step 2: Find Intermediate Link
-          const pattern1 = /id="download"[^>]*href="([^"]+)"/;
-          const pattern2 = /var url = '([^']+)'/;
-          const pattern3 = /href="([^"]+hubcloud\.php\?[^"]+)"/;
-
-          const intermediateMatch = pattern1.exec(resp.data) || pattern2.exec(resp.data) || pattern3.exec(resp.data);
-
-          if (intermediateMatch) {
-            const intermediateLink = intermediateMatch[1].replace(/&amp;/g, '&');
-            console.log('[HubCloud Native] Found intermediate link, redirecting...');
-
-            try {
-              const finalResp = await axios.get(intermediateLink, {
-                headers,
-                timeout: 8000,
-                maxRedirects: 10,
-                validateStatus: (status: number) => status < 500,
-              });
-              if (finalResp.data && typeof finalResp.data === 'string' && finalResp.data.length > 100) {
-                if (finalResp.data.includes('cf-browser-verification') || finalResp.data.includes('cf_chl_opt')) {
-                  return { status: 'error', message: 'Intermediate page Cloudflare protected' };
-                }
-                finalHtml = finalResp.data;
-              }
-            } catch (intermediateErr: any) {
-              console.warn(`[HubCloud Native] Intermediate failed: ${intermediateErr.message}`);
-            }
-          }
-
-          break; // Got a page
-        }
-
-        if (resp.status === 403) {
-          console.log(`[HubCloud Native] Attempt ${attempt + 1} got 403, retrying...`);
-          continue;
-        }
-      } catch (reqErr: any) {
-        console.warn(`[HubCloud Native] Attempt ${attempt + 1} failed: ${reqErr.message}`);
-        if (attempt === headerSets.length - 1) throw reqErr;
-      }
-    }
-
-    if (!gotPage || !finalHtml) {
-      return { status: 'error', message: 'Failed to fetch page (blocked/empty)' };
-    }
-
-    // Step 4: Extract download buttons
-    const rawLinkRegex = /<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
-    const allExtractedLinks: HubCloudButton[] = [];
-
-    let regexMatch: RegExpExecArray | null;
-    while ((regexMatch = rawLinkRegex.exec(finalHtml)) !== null) {
-      const href = regexMatch[1];
-      const innerHTML = regexMatch[2];
-
-      let cleanName = innerHTML.replace(/<[^>]+>/g, '').trim();
-      cleanName = cleanName.replace(/\s+/g, ' ');
-
-      if (!cleanName) continue;
-      if (cleanName.toLowerCase().includes('telegram')) continue;
-      if (cleanName.toLowerCase().includes('android app')) continue;
-
-      const hasToken = href.includes('token=');
-      const hasServer = cleanName.toLowerCase().includes('server');
-      const hasDownload = cleanName.toLowerCase().includes('download');
-
-      if (hasToken || hasServer || hasDownload) {
-        allExtractedLinks.push({
-          button_name: cleanName,
-          download_link: href,
-        });
-      }
-    }
-
-    if (allExtractedLinks.length === 0) {
-      return { status: 'error', message: 'No valid download button found on the page.' };
-    }
-
-    // Step 5: Priority Logic
-    let bestLink: string | null = null;
-    let bestButtonName: string | null = null;
-
-    for (const item of allExtractedLinks) {
-      if (item.button_name.includes('FSL Server') && !item.button_name.includes('v2')) {
-        bestLink = item.download_link;
-        bestButtonName = item.button_name;
-        break;
-      }
-    }
-
-    if (!bestLink) {
-      for (const item of allExtractedLinks) {
-        if (item.download_link.includes('token=') || item.button_name.includes('Server')) {
-          bestLink = item.download_link;
-          bestButtonName = item.button_name;
-          break;
-        }
-      }
-    }
-
-    if (!bestLink && allExtractedLinks.length > 0) {
-      bestLink = allExtractedLinks[0].download_link;
-      bestButtonName = allExtractedLinks[0].button_name;
-    }
-
-    return {
-      status: 'success',
-      best_button_name: bestButtonName || undefined,
-      best_download_link: bestLink || undefined,
-      all_available_buttons: allExtractedLinks,
-    };
-
-  } catch (e: any) {
-    return { status: 'error', message: e.message };
-  }
-}
-
-/**
- * MAIN HUBCLOUD SOLVER
- */
-export async function solveHubCloudNative(url: string): Promise<HubCloudNativeResult> {
-  console.log(`[HubCloud] 🚀 Starting: ${url}`);
-
-  // ── LAYER 1: External Python API (PRIMARY — reliable Cloudflare bypass) ──
-  const apiResult = await _solveHubCloudViaAPI(url);
-  if (apiResult.status === 'success') {
-    console.log('[HubCloud] ✅ Solved via Custom Python API');
-    return apiResult;
-  }
-  console.log(`[HubCloud] ⚠️ API failed: ${apiResult.message}`);
-
-  // ── LAYER 2: Native axios fetch (FALLBACK — non-CF pages only) ──
-  console.log('[HubCloud] 🔄 Trying native fetch fallback...');
-  const nativeResult = await _solveHubCloudNativeFetch(url);
-  if (nativeResult.status === 'success') {
-    console.log('[HubCloud] ✅ Solved via Native fetch');
-    return nativeResult;
-  }
-  console.log(`[HubCloud] ❌ Native also failed: ${nativeResult.message}`);
-
-  // ── BOTH FAILED ──
-  return {
-    status: 'error',
-    message: `API: ${apiResult.message} | Native: ${nativeResult.message}`,
-  };
 }
